@@ -185,8 +185,9 @@ def train(
     model = prepare_model_for_int8_training(model)
 
     ### peft configuraiton ###
+    # lora, adalora, ia3, loha, lokr, prefix_tuning, prompt_tuning
     config = None
-    if peft_method == "loha":
+    if peft_method == "adalora":
         config = AdaLoraConfig(
             peft_type="ADALORA", task_type="SEQ_2_SEQ_LM", r=8, lora_alpha=32, target_modules=["q", "v"],
             lora_dropout=0.01,
