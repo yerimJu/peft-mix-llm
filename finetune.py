@@ -15,6 +15,12 @@ import bitsandbytes as bnb
 
 from peft import (
     LoraConfig,
+    LoHaConfig,
+    LoKrConfig,
+    IA3Config,
+    AdaLoraConfig,
+    PrefixTuningConfig,
+    PromptTuningConfig,
     get_peft_model,
     get_peft_model_state_dict,
     prepare_model_for_int8_training,
@@ -23,6 +29,9 @@ from peft import (
 from transformers import LlamaForCausalLM, LlamaTokenizer
 
 from utils.prompter import Prompter
+
+import nltk
+from nltk.translate.bleu_score import sentence_bleu
 
 
 def train(
@@ -37,6 +46,8 @@ def train(
     learning_rate: float = 3e-4,
     cutoff_len: int = 256,
     val_set_size: int = 2000,
+    ### custom for various peft method ###
+    peft_method = "lora",
     # lora hyperparams
     lora_r: int = 8,
     lora_alpha: int = 16,
@@ -173,14 +184,73 @@ def train(
 
     model = prepare_model_for_int8_training(model)
 
-    config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=lora_target_modules,
-        lora_dropout=lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
+    ### peft configuraiton ###
+    config = None
+    if peft_method == "loha":
+        config = AdaLoraConfig(
+            peft_type="ADALORA", task_type="SEQ_2_SEQ_LM", r=8, lora_alpha=32, target_modules=["q", "v"],
+            lora_dropout=0.01,
+        )
+    elif peft_method == "ia3":
+        config = IA3Config(
+            peft_type="IA3",
+            task_type="SEQ_2_SEQ_LM",
+            target_modules=["k", "v", "w0"],
+            feedforward_modules=["w0"],
+        )
+    elif peft_method == "loha":
+        config = LoHaConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["k_proj", "q_proj", "v_proj", "out_proj", "fc1", "fc2"],
+            rank_dropout=0.0,
+            module_dropout=0.0,
+            init_weights=True,
+        )
+    elif peft_method == "lokr":
+        config = LoKrConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["k_proj", "q_proj", "v_proj", "out_proj", "fc1", "fc2"],
+            rank_dropout=0.0,
+            module_dropout=0.0,
+            init_weights=True,
+        )
+    elif peft_method == "prefix_tuning":
+        config = PrefixTuningConfig(
+            peft_type="PREFIX_TUNING",
+            task_type="SEQ_2_SEQ_LM",
+            num_virtual_tokens=20,
+            token_dim=768,
+            num_transformer_submodules=1,
+            num_attention_heads=12,
+            num_layers=12,
+            encoder_hidden_size=768,
+        )
+    elif peft_method == "prompt_tuning":
+        config = PromptTuningConfig(
+            peft_type="PROMPT_TUNING",
+            task_type="SEQ_2_SEQ_LM",
+            num_virtual_tokens=20,
+            token_dim=768,
+            num_transformer_submodules=1,
+            num_attention_heads=12,
+            num_layers=12,
+            prompt_tuning_init="TEXT",
+            prompt_tuning_init_text="Predict if sentiment of this review is positive, negative or neutral",
+            tokenizer_name_or_path="t5-base",
+        )
+    else:
+        # default: lora
+        config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+
     model = get_peft_model(model, config)
 
     if data_path.endswith(".json") or data_path.endswith(".jsonl"):
@@ -229,10 +299,26 @@ def train(
         model.is_parallelizable = True
         model.model_parallel = True
 
+    def compute_metrics(pred):
+        # blue for text generation
+        references = pred.label_ids
+        generated_texts = pred.predictions
+        
+        bleu_scores = []
+        for reference, generated_text in zip(references, generated_texts):
+            reference_text = train_data[reference]['output']
+            bleu_score = sentence_bleu([reference_text], generated_text)
+            bleu_scores.append(bleu_score)
+
+        return {
+            'bleu': sum(bleu_scores) / len(bleu_scores)
+        }
+
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
         eval_dataset=val_data,
+        compute_metrics=compute_metrics,
         args=transformers.TrainingArguments(
             per_device_train_batch_size=micro_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
@@ -273,6 +359,9 @@ def train(
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     model.save_pretrained(output_dir)
+    # evaluate the fine-tuned model
+    # results = trainer.evaluate()
+    # print(results)
 
     print(
         "\n If there's a warning about missing keys above, please disregard :)"

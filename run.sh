@@ -1,13 +1,14 @@
 python finetune.py \
     --base_model 'meta-llama/Llama-2-13b-hf' \
     --data_path './alpaca_data_gpt4_700.json' \
-    --output_dir './lora-alpaca' \
+    --output_dir './outputs/lora' \
     --batch_size 16 \
     --micro_batch_size 2 \
-    --num_epochs 3 \
+    --num_epochs 1 \
     --learning_rate 1e-4 \
     --cutoff_len 512 \
     --val_set_size 200 \
+    --peft_method lora \
     --lora_r 8 \
     --lora_alpha 16 \
     --lora_dropout 0.05 \
