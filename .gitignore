@@ -1,3 +1,6 @@
+outputs/
+venv/
+
 out/
 7B/
 13B/
