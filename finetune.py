@@ -30,8 +30,8 @@ from transformers import LlamaForCausalLM, LlamaTokenizer
 
 from utils.prompter import Prompter
 
-import nltk
-from nltk.translate.bleu_score import sentence_bleu
+import numpy as np
+import evaluate
 
 
 def train(
@@ -300,20 +300,27 @@ def train(
         model.is_parallelizable = True
         model.model_parallel = True
 
-    def compute_metrics(pred):
-        # blue for text generation
-        references = pred.label_ids
-        generated_texts = pred.predictions
-        
-        bleu_scores = []
-        for reference, generated_text in zip(references, generated_texts):
-            reference_text = train_data[reference]['output']
-            bleu_score = sentence_bleu([reference_text], generated_text)
-            bleu_scores.append(bleu_score)
+    bleu = evaluate.load("bleu")
+    def compute_metrics(eval_preds):
+        print("compute_metrics()")
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
 
-        return {
-            'bleu': sum(bleu_scores) / len(bleu_scores)
-        }
+        preds = np.argmax(preds, axis=-1)
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+
+        # skip label_id -100
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        # preprocessing
+        decoded_preds = [pred.strip() for pred in decoded_preds]
+        decoded_labels = [[label.strip()] for label in decoded_labels]
+
+        result = bleu.compute(predictions=decoded_preds, references=decoded_labels)
+        print(result)
+        return result
 
     trainer = transformers.Trainer(
         model=model,
@@ -360,9 +367,9 @@ def train(
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     model.save_pretrained(output_dir)
-    # evaluate the fine-tuned model
-    # results = trainer.evaluate()
-    # print(results)
+
+    results = trainer.evaluate()
+    print(results)
 
     print(
         "\n If there's a warning about missing keys above, please disregard :)"
