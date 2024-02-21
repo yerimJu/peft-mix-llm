@@ -19,6 +19,8 @@ from peft import (
     LoKrConfig,
     IA3Config,
     AdaLoraConfig,
+    # DoraConfig,
+    VeraConfig,
     PrefixTuningConfig,
     PromptTuningConfig,
     get_peft_model,
@@ -33,6 +35,9 @@ from utils.prompter import Prompter
 import numpy as np
 import evaluate
 
+
+# to avoid fragmentation: torch.cuda.OutOfMemoryError
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 def train(
     # model/data params
@@ -120,9 +125,14 @@ def train(
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
 
+    load_in_8bit = True
+    # Linear8bitLt does not support DoRA yet
+    if peft_method == "dora":
+        load_in_8bit = False
+
     model = LlamaForCausalLM.from_pretrained(
         base_model,
-        load_in_8bit=True,
+        load_in_8bit=load_in_8bit,
         torch_dtype=torch.float16,
         device_map=device_map,
     )
@@ -182,27 +192,30 @@ def train(
             ]  # could be sped up, probably
         return tokenized_full_prompt
 
-    model = prepare_model_for_int8_training(model)
+    if load_in_8bit:
+        model = prepare_model_for_int8_training(model)
 
     ### peft configuraiton ###
     # lora, adalora, ia3, loha, lokr, prefix_tuning, prompt_tuning
     config = None
     if peft_method == "adalora":
         config = AdaLoraConfig(
-            peft_type="ADALORA", task_type="SEQ_2_SEQ_LM", r=8, lora_alpha=32, target_modules=["q", "v"],
-            lora_dropout=0.01,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
         )
     elif peft_method == "ia3":
         config = IA3Config(
             peft_type="IA3",
-            task_type="SEQ_2_SEQ_LM",
-            target_modules=["k", "v", "w0"],
+            task_type="CAUSAL_LM",
             feedforward_modules=["w0"],
         )
     elif peft_method == "loha":
         config = LoHaConfig(
             r=8,
-            lora_alpha=32,
             target_modules=["k_proj", "q_proj", "v_proj", "out_proj", "fc1", "fc2"],
             rank_dropout=0.0,
             module_dropout=0.0,
@@ -211,7 +224,6 @@ def train(
     elif peft_method == "lokr":
         config = LoKrConfig(
             r=8,
-            lora_alpha=32,
             target_modules=["k_proj", "q_proj", "v_proj", "out_proj", "fc1", "fc2"],
             rank_dropout=0.0,
             module_dropout=0.0,
@@ -220,7 +232,7 @@ def train(
     elif peft_method == "prefix_tuning":
         config = PrefixTuningConfig(
             peft_type="PREFIX_TUNING",
-            task_type="SEQ_2_SEQ_LM",
+            task_type="CAUSAL_LM",
             num_virtual_tokens=20,
             token_dim=768,
             num_transformer_submodules=1,
@@ -231,7 +243,7 @@ def train(
     elif peft_method == "prompt_tuning":
         config = PromptTuningConfig(
             peft_type="PROMPT_TUNING",
-            task_type="SEQ_2_SEQ_LM",
+            task_type="CAUSAL_LM",
             num_virtual_tokens=20,
             token_dim=768,
             num_transformer_submodules=1,
@@ -240,6 +252,17 @@ def train(
             prompt_tuning_init="TEXT",
             prompt_tuning_init_text="Predict if sentiment of this review is positive, negative or neutral",
             tokenizer_name_or_path="t5-base",
+        )
+    # elif peft_method == "dora":
+        # config = LoraConfig(
+        #     use_dora=True,
+        #     task_type="CAUSAL_LM",
+        # )
+        # config = DoraConfig()
+    elif peft_method == "vera":
+        config = VeraConfig(
+            projection_prng_key=8,
+            save_projection=False,
         )
     else:
         # default: lora
@@ -329,6 +352,7 @@ def train(
         compute_metrics=compute_metrics,
         args=transformers.TrainingArguments(
             per_device_train_batch_size=micro_batch_size,
+            per_device_eval_batch_size=micro_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
             warmup_steps=100,
             num_train_epochs=num_epochs,
@@ -368,7 +392,7 @@ def train(
 
     model.save_pretrained(output_dir)
 
-    results = trainer.evaluate()
+    results = trainer.evaluate(eval_dataset=val_data)
     print(results)
 
     print(
