@@ -28,7 +28,7 @@ from peft import (
     prepare_model_for_int8_training,
     set_peft_model_state_dict,
 )
-from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer, BitsAndBytesConfig
 
 from utils.prompter import Prompter
 
@@ -130,12 +130,26 @@ def train(
     if peft_method == "dora":
         load_in_8bit = False
 
-    model = LlamaForCausalLM.from_pretrained(
-        base_model,
-        load_in_8bit=load_in_8bit,
-        torch_dtype=torch.float16,
-        device_map=device_map,
-    )
+    if peft_method == "qlora":
+        model = LlamaForCausalLM.from_pretrained(
+            base_model,
+            load_in_4bit=True,
+            device_map='auto',
+            torch_dtype=torch.bfloat16,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type='nf4'
+            ),
+        )
+    else:
+        model = LlamaForCausalLM.from_pretrained(
+            base_model,
+            load_in_8bit=load_in_8bit,
+            torch_dtype=torch.float16,
+            device_map=device_map,
+        )
 
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
 
@@ -261,6 +275,8 @@ def train(
         # config = DoraConfig()
     elif peft_method == "vera":
         config = VeraConfig(
+            r=lora_r,
+            target_modules=lora_target_modules,
             projection_prng_key=8,
             save_projection=False,
         )
